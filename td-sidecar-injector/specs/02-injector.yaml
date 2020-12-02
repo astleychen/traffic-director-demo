@@ -1,0 +1,409 @@
+---
+# Source: td-autoinject/templates/poddisruptionbudget.yaml
+# yamllint disable
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: istio-sidecar-injector
+  namespace: istio-control
+  labels:
+    app: sidecar-injector
+    release: istio-control-istio-autoinject
+    istio: sidecar-injector
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: sidecar-injector
+      release: istio-control-istio-autoinject
+      istio: sidecar-injector
+
+---
+# Source: td-autoinject/templates/sidecar-injector-configmap.yaml
+# yamllint disable
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: istio-sidecar-injector
+  namespace: istio-control
+  labels:
+    release: istio-control-istio-autoinject
+    app: sidecar-injector
+    istio: sidecar-injector
+data:
+  values: |-
+    {"clusterResources":true,"global":{"arch":{"amd64":2,"ppc64le":2,"s390x":2},"configNamespace":"istio-control","configValidation":"false","controlPlaneSecurityEnabled":true,"defaultNodeSelector":{},"defaultPodDisruptionBudget":{"enabled":true},"defaultResources":{"requests":{"cpu":"10m"}},"disablePolicyChecks":true,"enableHelmTest":false,"enableTracing":true,"hub":"istio","imagePullPolicy":"Always","imagePullSecrets":[],"istioNamespace":"istio-control","k8sIngress":{"enableHttps":false,"enabled":false,"gatewayName":"ingressgateway"},"localityLbSetting":{"enabled":true},"logAsJson":false,"logging":{"level":"default:info"},"meshExpansion":{"enabled":false,"useILB":false},"meshID":"","meshNetworks":{},"mtls":{"enabled":false},"multiCluster":{"enabled":false},"oneNamespace":false,"outboundTrafficPolicy":{"mode":"ALLOW_ANY"},"policyCheckFailOpen":false,"policyNamespace":"istio-system","priorityClassName":"","prometheusNamespace":"istio-system","proxy":{"accessLogEncoding":"TEXT","accessLogFile":"","accessLogFormat":"","autoInject":"enabled","clusterDomain":"cluster.local","componentLogLevel":"misc:error","concurrency":2,"dnsRefreshRate":"300s","enableCoreDump":false,"envoyAccessLogService":{"enabled":false,"host":null,"port":null},"envoyMetricsService":{"enabled":false,"host":null,"port":null},"envoyStatsd":{"enabled":false,"host":null,"port":null},"excludeIPRanges":"","excludeInboundPorts":"","excludeOutboundPorts":"","image":"proxyv2","includeIPRanges":"*","includeInboundPorts":"*","kubevirtInterfaces":"","logLevel":"warning","privileged":false,"protocolDetectionTimeout":"10ms","readinessFailureThreshold":30,"readinessInitialDelaySeconds":1,"readinessPeriodSeconds":2,"resources":{"limits":{"cpu":"2000m","memory":"1024Mi"},"requests":{"cpu":"100m","memory":"128Mi"}},"statusPort":15020,"tag":"1.7.0","tracer":"zipkin"},"proxy_init":{"image":"proxyv2","resources":{"limits":{"cpu":"100m","memory":"50Mi"},"requests":{"cpu":"10m","memory":"10Mi"}}},"sds":{"enabled":false,"udsPath":""},"tag":"1.5.8","telemetryNamespace":"istio-system","tracer":{"datadog":{"address":"$(HOST_IP):8126"},"lightstep":{"accessToken":"","address":"","cacertPath":"","secure":true},"zipkin":{"address":""}},"trustDomain":"","useMCP":true},"istio_cni":{"enabled":false},"sidecarInjectorWebhook":{"alwaysInjectSelector":[],"enableAccessLog":false,"enableNamespacesByDefault":false,"image":"sidecar_injector","injectLabel":"istio-injection","neverInjectSelector":[],"nodeSelector":{},"podAntiAffinityLabelSelector":[],"podAntiAffinityTermLabelSelector":[],"replicaCount":2,"rewriteAppHTTPProbe":false,"rollingMaxSurge":"100%","rollingMaxUnavailable":"25%","selfSigned":true,"tolerations":[]},"version":""}
+
+  config: |-
+    policy: enabled
+    alwaysInjectSelector:
+      []
+
+    neverInjectSelector:
+      []
+
+    template: |
+      containers:
+      - name: istio-proxy
+        image: "{{ .Values.global.hub }}/{{ .Values.global.proxy_init.image }}:{{ .Values.global.proxy.tag }}"
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 15090
+          name: http-envoy-prom
+          protocol: TCP
+        args:
+        - proxy
+        - sidecar
+        - --domain
+        - $(POD_NAMESPACE).svc.cluster.local
+        - --serviceCluster
+        {{- if ne "" (index .ObjectMeta.Labels "app") }}
+        - "{{ index .ObjectMeta.Labels `app` }}.$(POD_NAMESPACE)"
+        {{- else }}
+        - "{{ valueOrDefault .DeploymentMeta.Name `istio-proxy` }}.{{ valueOrDefault .DeploymentMeta.Namespace `default` }}"
+        {{- end }}
+        - --proxyLogLevel=warning
+        - --proxyComponentLogLevel=misc:error
+        - --trust-domain=cluster.local
+        - --concurrency
+        - "2"
+        env:
+        {{- range $key, $val := .ProxyConfig.ProxyMetadata }}
+          {{- if contains "TRAFFICDIRECTOR_" $key }}
+        - name: ISTIO_META_{{ $key }}
+          value: "{{ $val }}"
+          {{- else }}
+        - name: {{ $key }}
+          value: "{{ $val }}"
+          {{- end }}
+        {{- end }}
+        {{- range $key, $val := (fromJSON (annotation .ObjectMeta `cloud.google.com/proxyMetadata` `{}`)) }}
+        - name: ISTIO_META_{{ $key }}
+          value: "{{ $val }}"
+        {{- end }}
+        - name: ISTIO_BOOTSTRAP
+          value: "/var/lib/istio/envoy/gcp_envoy_bootstrap_tmpl.json"
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: INSTANCE_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: HOST_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: ISTIO_META_TRAFFICDIRECTOR_INTERCEPTION_PORT
+          value: "15001"
+        - name: PROXY_CONFIG
+          value: |
+                 {{ protoToJSON .ProxyConfig }}
+        - name: ISTIO_META_INTERCEPTION_MODE
+          value: REDIRECT
+        resources:
+          limits:
+            cpu: "2"
+            memory: 1Gi
+          requests:
+            cpu: 100m
+            memory: 128Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: true
+          runAsGroup: 1337
+          runAsNonRoot: true
+          runAsUser: 1337
+        volumeMounts:
+        - mountPath: /var/lib/istio/data
+          name: istio-data
+        - mountPath: /etc/istio/proxy
+          name: istio-envoy
+      initContainers:
+      - name: istio-init
+        image: "{{ .Values.global.hub }}/{{ .Values.global.proxy.image }}:{{ .Values.global.proxy.tag }}"
+        imagePullPolicy: IfNotPresent
+        args:
+        - istio-iptables
+        - -p
+        - "15001"
+        - -u
+        - "1337"
+        - -m
+        - REDIRECT
+        - -i
+        - "*"
+        - -x
+        - ""
+        - -d
+        - 15090,15021,15020
+        resources:
+          limits:
+            cpu: 100m
+            memory: 50Mi
+          requests:
+            cpu: 10m
+            memory: 10Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+            drop:
+            - ALL
+          privileged: false
+          readOnlyRootFilesystem: false
+          runAsGroup: 0
+          runAsNonRoot: false
+          runAsUser: 0
+      volumes:
+      - name: istio-envoy
+        emptyDir:
+          medium: Memory
+      - name: istio-data
+        emptyDir: {}
+    ---
+
+
+
+---
+# Source: td-autoinject/templates/serviceaccount.yaml
+# yamllint disable
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: istio-sidecar-injector-service-account
+  namespace: istio-control
+  labels:
+    app: sidecar-injector
+    release: istio-control-istio-autoinject
+    istio: sidecar-injector
+
+---
+# Source: td-autoinject/templates/clusterrole.yaml
+# yamllint disable
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: istio-sidecar-injector-istio-control
+  labels:
+    app: sidecar-injector
+    release: istio-control-istio-autoinject
+    istio: sidecar-injector
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  resourceNames: ["istio-sidecar-injector"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["admissionregistration.k8s.io"]
+  resources: ["mutatingwebhookconfigurations"]
+  resourceNames: ["istio-sidecar-injector", "istio-sidecar-injector-istio-control"]
+  verbs: ["get", "list", "watch", "patch"]
+
+---
+# Source: td-autoinject/templates/clusterrolebinding.yaml
+# yamllint disable
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: istio-sidecar-injector-admin-role-binding-istio-control
+  labels:
+    app: sidecar-injector
+    release: istio-control-istio-autoinject
+    istio: sidecar-injector
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: istio-sidecar-injector-istio-control
+subjects:
+  - kind: ServiceAccount
+    name: istio-sidecar-injector-service-account
+    namespace: istio-control
+
+---
+# Source: td-autoinject/templates/service.yaml
+# yamllint disable
+apiVersion: v1
+kind: Service
+metadata:
+  name: istio-sidecar-injector
+  namespace: istio-control
+  labels:
+    app: sidecar-injector
+    release: istio-control-istio-autoinject
+    istio: sidecar-injector
+spec:
+  ports:
+  - port: 443
+    targetPort: 9443
+  selector:
+    istio: sidecar-injector
+
+---
+# Source: td-autoinject/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: istio-sidecar-injector
+  namespace: istio-control
+  labels:
+    app: sidecarInjectorWebhook
+    release: istio-control-istio-autoinject
+    istio: sidecar-injector
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      istio: sidecar-injector
+  strategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app: sidecarInjectorWebhook
+        istio: sidecar-injector
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      serviceAccountName: istio-sidecar-injector-service-account
+      containers:
+        - name: sidecar-injector-webhook
+          image: "istio/sidecar_injector:1.5.8"
+          imagePullPolicy: Always
+          args:
+            - --caCertFile=/etc/istio/certs/ca-cert.pem
+            - --tlsCertFile=/etc/istio/certs/cert.pem
+            - --tlsKeyFile=/etc/istio/certs/key.pem
+            - --injectConfig=/etc/istio/inject/config
+            - --meshConfig=/etc/istio/config/mesh
+            - --port=9443
+            - --healthCheckInterval=2s
+            - --healthCheckFile=/tmp/health
+            - --reconcileWebhookConfig=true
+            - --webhookConfigName=istio-sidecar-injector-istio-control
+            - --log_output_level=debug
+
+
+
+          volumeMounts:
+          - name: config-volume
+            mountPath: /etc/istio/config
+            readOnly: true
+          - name: certs
+            mountPath: /etc/istio/certs
+            readOnly: true
+          - name: inject-config
+            mountPath: /etc/istio/inject
+            readOnly: true
+          livenessProbe:
+            exec:
+              command:
+                - /usr/local/bin/sidecar-injector
+                - probe
+                - --probe-path=/tmp/health
+                - --interval=4s
+            initialDelaySeconds: 4
+            periodSeconds: 4
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/sidecar-injector
+                - probe
+                - --probe-path=/tmp/health
+                - --interval=4s
+            initialDelaySeconds: 4
+            periodSeconds: 4
+          resources:
+            requests:
+              cpu: 10m
+
+      volumes:
+      - name: config-volume
+        configMap:
+          name: injector-mesh
+      - name: certs
+        secret:
+          secretName: istio-sidecar-injector
+      - name: inject-config
+        configMap:
+          name: istio-sidecar-injector
+          items:
+          - key: config
+            path: config
+          - key: values
+            path: values
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: beta.kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+                - ppc64le
+                - s390x
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 2
+            preference:
+              matchExpressions:
+              - key: beta.kubernetes.io/arch
+                operator: In
+                values:
+                - amd64
+          - weight: 2
+            preference:
+              matchExpressions:
+              - key: beta.kubernetes.io/arch
+                operator: In
+                values:
+                - ppc64le
+          - weight: 2
+            preference:
+              matchExpressions:
+              - key: beta.kubernetes.io/arch
+                operator: In
+                values:
+                - s390x
+
+---
+# Source: td-autoinject/templates/mutatingwebhook.yaml
+# yamllint disable
+apiVersion: admissionregistration.k8s.io/v1beta1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: istio-sidecar-injector-istio-control
+  labels:
+    app: sidecar-injector
+    release: istio-control-istio-autoinject
+webhooks:
+  - name: sidecar-injector.istio.io
+    clientConfig:
+      service:
+        name: istio-sidecar-injector
+        namespace: istio-control
+        path: "/inject"
+      caBundle: "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSUU0akNDQXNvQ0NRRDlEanZ5TVBlL3FUQU5CZ2txaGtpRzl3MEJBUXNGQURBek1URXdMd1lEVlFRRERDaHAKYzNScGJ5MXphV1JsWTJGeUxXbHVhbVZqZEc5eUxtbHpkR2x2TFdOdmJuUnliMnd1YzNaak1CNFhEVEl3TVRFeApOakE0TURBeU4xb1hEVEl4TVRFeE5qQTRNREF5TjFvd016RXhNQzhHQTFVRUF3d29hWE4wYVc4dGMybGtaV05oCmNpMXBibXBsWTNSdmNpNXBjM1JwYnkxamIyNTBjbTlzTG5OMll6Q0NBaUl3RFFZSktvWklodmNOQVFFQkJRQUQKZ2dJUEFEQ0NBZ29DZ2dJQkFKNVNLSlBGb0d0VG1NRXR4a3AyRHlFZ0Q5azdKWVhzR2ttRVBud0tjbmQyVVFrSQpCcGVLcnZ2VFdNb3UvODI3bHRaNFZHcmEreFNydWxHcjFOY29wN05MSlRKTzFVeFYrSWduY1NhMTdtYXgzZHhzCnZwbGswUFNUeFMvdm5zZyt0b3Q4alZta0JBa284anJYeVhSWVBQSVp6QVB0NTlCN1JIUDFXOWUrazYvSzBXb3AKWi96OEQ3NDhuT0R6YWlWa0gxcFRFUUNJQ0NFL1lnUnYyT3huZDNxYlkvTXRwVVovcGxFdFpTZ1ZybkQzSEg4MgptY0pSYjhtZDdtdWFVdFZNM1BMa01UQWZzV2JSSVJUTU5TQkNkZStPMUFSbWxraTR1OGVvajlLUkdiUkhjTmdSCmI4VDVRYm8zN1hhb2tIU25BNG5XclIrOEQ0SjVpcnQzVENvRW13MG1oVjZBU0Y3OW1haUdtUVhxVUNMU29zVXcKd1JHMFdLM1FDZ1ZGdmdzOVdZbTlLdjJmeThBVTdKczRoUEN5OSt1RDJ1bXlCWUlGbXU4aHJUNmlBck1oSHhUdgo5dmcxLzVCcExZZGNTWm9zQVRMeFZheUNmdnVNSVAwUzJzTmMzbDc1dzZndnkybzNZZ1FIdklxbnIyWmZHbUNzCkJhRlRSNEZmU1NNNXBRMW83YXpKTzdUZ2hVUXk2M3FDYmt0SFNKd2tXdDdtd0ZXczM1MlIwRUVuaVpVdGdMa1MKUnlyM2Z6UDFSTTJpU0VTSEFweElHZjlYRmxmamdHTU9PMFY2b1dyWS9PVlBBc1VoYkw4LzRXUmlMejRVU3dISwprMnZVZnp6OUFDZGViS1hyRGk4c0duMGx4UnUyN1h6R3FpeVZYaytiWGRnZWpvMnJvdTFrNGdDVGRwdXZBZ01CCkFBRXdEUVlKS29aSWh2Y05BUUVMQlFBRGdnSUJBRysvQmNFbDd3eEVheU1KSy9hSDFERW0rRGI3aUkwTGttUWwKNWpNLzc3alJLdHFxWUMwV1VWbmhwbXZEUzk3eFdyOWVKb2pPMkJlUjlKRE42UXZaUVllZm9BQ1hDLzNDYUl4eQpKb3RjYm8xYSsxb1pUSmdUTmlWTkJrMzMvT1c0Y0JTUTRzOTIyYkl5c0s5UmFDNUhMK3E5Vmo4ZjlkTm9HbDJPCjlNRm9wZFlINU9kNEdsaDJPRVRDNlN6VDMzQ3VJbzRmTm5MdG1iRjM4dTR5Mjk2Y0FUQnpHRE05RkZsWXplTW4KY3Z0WWR6UHIvS2d4U1pQTGFEOUhlZFVzOFJvRk9wU2FYUW5iZnRSSk5rejRQbHR3RWVrTlduN1lVcVMyRVdZbgpnakY4ZFlOSEt3SGJqbEdadU9nMHRDL0hsditmc1c1b2tScGhONHRoZ2RXYzZSOVFRL0dOVTgvSHRRamdvS2NXCkFaQ0NmdmgzcjBQejZMTEljOStmVUhiVHBNYktqcFBWcmxOKzEyaEJLaTJ6T3N3bTkzVER0K212aTFrSm1CejQKMjUyemdRcmFZWVFrVWQwQ3RiRGhvQ3c1Y1BPaWkzdE5GUlYrUEoxRmp6WTlYNUlGQXpSUWNFa0dDdzJ4Q3VqOQpucFNoODJHbUpZN2VjWjIxcWxoMm4yZVNoTWZucFV1ek9aMWNmd1RiT25JbGE3RGNYSEQ2M1QwZDVTc253c01YCjRHMWk5akNoZlo2UWg2eHlRYlBqcVVPbDdMWE1Bb2NVT3h2cjhwU1pvM3U0M1o1ck5FK0RxVW5NVXFCMElRYTIKSXpDT3VmREc3MGp6S3hSSkVqYysvVmlhcjVPejdtSGxlb1huczBqSVpEYTMxWlNneHRzVXpPb28rbXV1aW10UgptWHpka2Q5cAotLS0tLUVORCBDRVJUSUZJQ0FURS0tLS0tCg=="
+    rules:
+      - operations: [ "CREATE" ]
+        apiGroups: [""]
+        apiVersions: ["v1"]
+        resources: ["pods"]
+    failurePolicy: Fail
+    namespaceSelector:
+      matchLabels:
+        istio-injection: enabled
+---
+
